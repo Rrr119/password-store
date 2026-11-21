@@ -19,6 +19,9 @@ CLIP_TIME="${PASSWORD_STORE_CLIP_TIME:-45}"
 GENERATED_LENGTH="${PASSWORD_STORE_GENERATED_LENGTH:-25}"
 CHARACTER_SET="${PASSWORD_STORE_CHARACTER_SET:-[:punct:][:alnum:]}"
 CHARACTER_SET_NO_SYMBOLS="${PASSWORD_STORE_CHARACTER_SET_NO_SYMBOLS:-[:alnum:]}"
+ROTATION_DAYS="${PASSWORD_STORE_ROTATION_DAYS-90}"
+AUDIT_LOG="${PASSWORD_STORE_AUDIT_LOG-$PREFIX/.access.log}"
+ROTATION_DB="$PREFIX/.rotation"
 
 unset GIT_DIR GIT_WORK_TREE GIT_NAMESPACE GIT_INDEX_FILE GIT_INDEX_VERSION GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 export GIT_CEILING_DIRECTORIES="$PREFIX/.."
@@ -44,7 +47,7 @@ git_commit() {
 	local sign=""
 	[[ -n $INNER_GIT_DIR ]] || return
 	[[ $(git -C "$INNER_GIT_DIR" config --bool --get pass.signcommits) == "true" ]] && sign="-S"
-	git -C "$INNER_GIT_DIR" commit $sign -m "$1"
+	git -C "$INNER_GIT_DIR" commit $sign -m "$1" >&2
 }
 yesno() {
 	[[ -t 0 ]] || return 0
@@ -145,6 +148,123 @@ check_sneaky_paths() {
 		[[ $path =~ /\.\.$ || $path =~ ^\.\./ || $path =~ /\.\./ || $path =~ ^\.\.$ ]] && die "Error: You've attempted to pass a sneaky path to pass. Go home."
 	done
 }
+
+#
+# BEGIN audit log and rotation helpers
+#
+# Shared team stores keep two plain-text, append-friendly state files next to
+# the encrypted entries:
+#   .access.log  one line per access or modification (the audit trail)
+#   .rotation    "<pass-name>\t<last-change-epoch>" per entry
+# Both are ordinary files inside $PREFIX, so the existing git helpers commit
+# them automatically when the store is a git repository, and they are simply
+# ignored when it is not. Audit logging is disabled by setting
+# PASSWORD_STORE_AUDIT_LOG to an empty string.
+
+audit_log() {
+	[[ -n $AUDIT_LOG ]] || return 0
+	local action="$1" path="$2"
+	set_git "$AUDIT_LOG"
+	mkdir -p "$(dirname -- "$AUDIT_LOG")" || return
+	printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null)" "$(hostname 2>/dev/null)" "$action" "$path" >> "$AUDIT_LOG" || return
+	git_add_file "$AUDIT_LOG" "Audit $action event for $path."
+}
+
+rotation_commit() {
+	set_git "$ROTATION_DB"
+	git_add_file "$ROTATION_DB" "$1"
+}
+
+rotation_record() {
+	[[ -n $AUDIT_LOG ]] || return 0
+	local path="$1" now="${2:-$(date +%s)}" tmp
+	set_git "$ROTATION_DB"
+	mkdir -p "$(dirname -- "$ROTATION_DB")" || return
+	if [[ -f $ROTATION_DB ]]; then
+		tmp="$(mktemp "$ROTATION_DB.XXXXXX")" || return
+		awk -F '\t' -v key="$path" 'BEGIN { OFS = "\t" } $1 != key { print }' "$ROTATION_DB" > "$tmp"
+		printf '%s\t%s\n' "$path" "$now" >> "$tmp"
+		mv "$tmp" "$ROTATION_DB"
+	else
+		printf '%s\t%s\n' "$path" "$now" > "$ROTATION_DB"
+	fi
+	rotation_commit "Record rotation time for $path."
+}
+
+rotation_remove() {
+	[[ -n $AUDIT_LOG && -f $ROTATION_DB ]] || return 0
+	local path="$1" tmp
+	set_git "$ROTATION_DB"
+	tmp="$(mktemp "$ROTATION_DB.XXXXXX")" || return
+	awk -F '\t' -v key="$path" '
+		{ prefix = $1 "/" }
+		$1 != key && substr(prefix, 1, length(key) + 1) != key "/" { print }
+	' "$ROTATION_DB" > "$tmp"
+	mv "$tmp" "$ROTATION_DB"
+	rotation_commit "Remove rotation records for $path."
+}
+
+rotation_rename() {
+	[[ -n $AUDIT_LOG && -f $ROTATION_DB ]] || return 0
+	local old="$1" new="$2" tmp
+	set_git "$ROTATION_DB"
+	tmp="$(mktemp "$ROTATION_DB.XXXXXX")" || return
+	awk -F '\t' -v old="$old" -v new="$new" '
+		BEGIN { OFS = "\t" }
+		{
+			if ($1 == old)
+				$1 = new
+			else if (length($1) > length(old) && substr($1, 1, length(old) + 1) == old "/")
+				$1 = new substr($1, length(old) + 1)
+			print
+		}
+	' "$ROTATION_DB" > "$tmp"
+	mv "$tmp" "$ROTATION_DB"
+	rotation_commit "Update rotation records after renaming $old to $new."
+}
+
+rotation_copy() {
+	[[ -n $AUDIT_LOG && -f $ROTATION_DB ]] || return 0
+	local old="$1" new="$2" now tmp
+	set_git "$ROTATION_DB"
+	now="$(date +%s)"
+	tmp="$(mktemp "$ROTATION_DB.XXXXXX")" || return
+	awk -F '\t' -v old="$old" -v new="$new" -v now="$now" '
+		BEGIN { OFS = "\t" }
+		{
+			print
+			if ($1 == old || substr($1, 1, length(old) + 1) == old "/")
+				print new substr($1, length(old) + 1), ($1 == old ? now : $2)
+		}
+	' "$ROTATION_DB" > "$tmp"
+	mv "$tmp" "$ROTATION_DB"
+	rotation_commit "Copy rotation records from $old to $new."
+}
+
+rotation_get() {
+	[[ -f $ROTATION_DB ]] || return 1
+	awk -F '\t' -v key="$1" '$1 == key { print $2; exit }' "$ROTATION_DB"
+}
+
+file_mtime() {
+	stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+}
+
+rotation_warn() {
+	[[ -n $AUDIT_LOG && $ROTATION_DAYS =~ ^[0-9]+$ && $ROTATION_DAYS -gt 0 ]] || return 0
+	local path="$1" passfile="$PREFIX/$1.gpg" changed age
+	[[ -f $passfile ]] || return 0
+	changed="$(rotation_get "$path")"
+	[[ -n $changed ]] || changed="$(file_mtime "$passfile")"
+	age=$(( $(date +%s) - changed ))
+	if (( age >= ROTATION_DAYS * 86400 )); then
+		echo "Warning: $path is older than $ROTATION_DAYS days and should be rotated." >&2
+	fi
+}
+
+#
+# END audit log and rotation helpers
+#
 
 #
 # END helper functions
@@ -299,6 +419,11 @@ cmd_usage() {
 	    $PROGRAM git git-command-args...
 	        If the password store is a git repository, execute a git command
 	        specified by git-command-args.
+	    $PROGRAM log [pass-name]
+	        Show the access audit log, optionally filtered to pass-name.
+	    $PROGRAM audit [days]
+	        List entries whose age exceeds the rotation period (default $ROTATION_DAYS
+	        days); exits non-zero when one or more entries are due for rotation.
 	    $PROGRAM help
 	        Show this text.
 	    $PROGRAM version
@@ -386,6 +511,8 @@ cmd_show() {
 				qrcode "$pass" "$path"
 			fi
 		fi
+		audit_log "show" "$path"
+		rotation_warn "$path"
 	elif [[ -d $PREFIX/$path ]]; then
 		if [[ -z $path ]]; then
 			echo "Password Store"
@@ -421,6 +548,7 @@ cmd_grep() {
 		printf "\e[94m%s\e[1m%s\e[0m:\n" "$passfile_dir" "$passfile"
 		echo "$grepresults"
 	done < <(find -L "$PREFIX" -path '*/.git' -prune -o -path '*/.extensions' -prune -o -iname '*.gpg' -print0)
+	audit_log "grep" "$*"
 }
 
 cmd_insert() {
@@ -470,6 +598,8 @@ cmd_insert() {
 		echo "$password" | $GPG -e "${GPG_RECIPIENT_ARGS[@]}" -o "$passfile" "${GPG_OPTS[@]}" || die "Password encryption aborted."
 	fi
 	git_add_file "$passfile" "Add given password for $path to store."
+	rotation_record "$path"
+	audit_log "insert" "$path"
 }
 
 cmd_edit() {
@@ -497,6 +627,8 @@ cmd_edit() {
 		yesno "GPG encryption failed. Would you like to try again?"
 	done
 	git_add_file "$passfile" "$action password for $path using ${EDITOR:-vi}."
+	rotation_record "$path"
+	audit_log "edit" "$path"
 }
 
 cmd_generate() {
@@ -542,6 +674,8 @@ cmd_generate() {
 	local verb="Add"
 	[[ $inplace -eq 1 ]] && verb="Replace"
 	git_add_file "$passfile" "$verb generated password for ${path}."
+	rotation_record "$path"
+	audit_log "generate" "$path"
 
 	if [[ $clip -eq 1 ]]; then
 		clip "$pass" "$path"
@@ -582,6 +716,8 @@ cmd_delete() {
 		git_commit "Remove $path from store."
 	fi
 	rmdir -p "${passfile%/*}" 2>/dev/null
+	rotation_remove "$path"
+	audit_log "delete" "$path"
 }
 
 cmd_copy_move() {
@@ -613,6 +749,8 @@ cmd_copy_move() {
 
 	local interactive="-i"
 	[[ ! -t 0 || $force -eq 1 ]] && interactive="-f"
+	local old_was_dir=0
+	[[ -d $old_path ]] && old_was_dir=1
 
 	set_git "$new_path"
 	if [[ $move -eq 1 ]]; then
@@ -636,6 +774,25 @@ cmd_copy_move() {
 		cp $interactive -r -v "$old_path" "$new_path" || exit 1
 		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
 		git_add_file "$new_path" "Copy ${1} to ${2}."
+	fi
+	local store_dir="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
+	store_dir="${store_dir%/}"
+	local rotation_old="${old_path%.gpg}"
+	rotation_old="${rotation_old#"$store_dir"}"
+	rotation_old="$(printf '%s' "$rotation_old" | sed 's:^/*::')"
+	local rotation_new="${new_path%.gpg}"
+	rotation_new="${rotation_new%/}"
+	rotation_new="${rotation_new#"$store_dir"}"
+	rotation_new="$(printf '%s' "$rotation_new" | sed 's:^/*::')"
+	if [[ $old_was_dir -eq 0 && -d "${new_path%/}" ]]; then
+		rotation_new="${rotation_new%/}/$(basename -- "$rotation_old")"
+	fi
+	if [[ $move -eq 1 ]]; then
+		rotation_rename "$rotation_old" "${rotation_new%/}"
+		audit_log "rename" "$rotation_old -> $rotation_new"
+	else
+		rotation_copy "$rotation_old" "${rotation_new%/}"
+		audit_log "copy" "$rotation_old -> $rotation_new"
 	fi
 }
 
@@ -664,6 +821,46 @@ cmd_extension_or_show() {
 		COMMAND="show"
 		cmd_show "$@"
 	fi
+}
+
+cmd_log() {
+	[[ -n $AUDIT_LOG ]] || die "Error: audit logging is disabled (PASSWORD_STORE_AUDIT_LOG is empty)."
+	[[ $# -gt 1 ]] && die "Usage: $PROGRAM $COMMAND [pass-name]"
+	[[ -f $AUDIT_LOG ]] || die "Error: no audit log found at $AUDIT_LOG."
+	if [[ $# -eq 1 ]]; then
+		local path="$1"
+		check_sneaky_paths "$path"
+		awk -F '\t' -v key="$path" 'index($5, key) { print }' "$AUDIT_LOG"
+	else
+		cat "$AUDIT_LOG"
+	fi
+}
+
+cmd_audit() {
+	[[ $# -gt 1 ]] && die "Usage: $PROGRAM $COMMAND [days]"
+	local days="${1:-$ROTATION_DAYS}"
+	[[ $days =~ ^[0-9]+$ ]] || die "Error: rotation days must be a non-negative number."
+	if [[ $days -eq 0 ]]; then
+		echo "Rotation reminders are disabled."
+		return 0
+	fi
+	local now="$(date +%s)" passfile passname changed age status due=0
+	while read -r -d "" passfile; do
+		passname="${passfile%.gpg}"
+		passname="${passname#"$PREFIX"}"
+		passname="${passname#/}"
+		changed="$(rotation_get "$passname")"
+		[[ -n $changed ]] || changed="$(file_mtime "$passfile")"
+		age=$(( (now - changed) / 86400 ))
+		if (( now - changed >= days * 86400 )); then
+			status="DUE (last changed $age days ago)"
+			due=1
+		else
+			status="OK (last changed $age days ago)"
+		fi
+		printf '%s\t%s\n' "$passname" "$status"
+	done < <(find "$PREFIX" -path '*/.git' -prune -o -path '*/.extensions' -prune -o -iname '*.gpg' -print0 | LC_ALL=C sort -z)
+	exit "$due"
 }
 
 SYSTEM_EXTENSION_DIR=""
@@ -706,6 +903,8 @@ case "$1" in
 	rename|mv) shift;		cmd_copy_move "move" "$@" ;;
 	copy|cp) shift;			cmd_copy_move "copy" "$@" ;;
 	git) shift;			cmd_git "$@" ;;
+	log|audit-log) shift;		cmd_log "$@" ;;
+	audit) shift;			cmd_audit "$@" ;;
 	*)				cmd_extension_or_show "$@" ;;
 esac
 exit 0

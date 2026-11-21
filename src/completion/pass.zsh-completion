@@ -103,6 +103,8 @@ _pass () {
 			"cp:Copy the password"
 			"rm:Remove the password"
 			"git:Call git on the password store"
+			"log:Show the access audit log"
+			"audit:List passwords due for rotation"
 			"version:Output version information"
 			"help:Output help message"
 		)

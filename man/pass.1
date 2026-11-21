@@ -174,6 +174,28 @@ is set to \fItrue\fP, then all commits will be signed using \fIuser.signingkey\f
 default git signing key. This config key may be turned on using:
 .B `pass git config --bool --add pass.signcommits true`
 .TP
+\fBlog\fP [ \fIpass-name\fP ]
+Print the access audit log. Every access and modification of an entry (\fBshow\fP,
+\fBgrep\fP, \fBinsert\fP, \fBedit\fP, \fBgenerate\fP, \fBrm\fP, \fBmv\fP and
+\fBcp\fP) is appended as a tab-separated record containing the UTC timestamp,
+operating system user, host name, action and pass-name. If \fIpass-name\fP is
+given, only records mentioning that entry or a path underneath it are shown.
+The log is stored at \fI~/.password-store/.access.log\fP and is committed like
+any other file when the store is a git repository. Audit logging is disabled
+by setting \fIPASSWORD_STORE_AUDIT_LOG\fP to an empty string.
+.TP
+\fBaudit\fP [ \fIdays\fP ]
+List every entry in the store together with the number of days elapsed since
+its password last changed, marking entries \fBOK\fP or \fBDUE\fP for rotation.
+The optional \fIdays\fP argument overrides the rotation period, which otherwise
+defaults to \fI90\fP days or the value of \fIPASSWORD_STORE_ROTATION_DAYS\fP;
+a period of \fI0\fP disables rotation reminders. The command exits with a
+non-zero status when one or more entries are due. Last-change times are kept in
+\fI~/.password-store/.rotation\fP; entries missing from that file fall back to
+the modification time of their encrypted \fI.gpg\fP file. A warning is also
+printed to the standard error stream by \fBshow\fP when an entry is past the
+rotation period.
+.TP
 \fBhelp\fP
 Show usage message.
 .TP
@@ -405,6 +427,16 @@ encrypted using those keys. This should be set using the \fBinit\fP command.
 .TP
 .B ~/.password-store/.extensions
 The directory containing extension files.
+.TP
+.B ~/.password-store/.access.log
+Append-only access audit log. One tab-separated record per access or
+modification, recording the UTC timestamp, user, host, action and pass-name.
+Tracked by git like any other store file when the store is a git repository.
+.TP
+.B ~/.password-store/.rotation
+Rotation database mapping each pass-name to the epoch timestamp of its last
+password change. It is updated by \fBinsert\fP, \fBedit\fP, \fBgenerate\fP,
+\fBmv\fP, \fBcp\fP and \fBrm\fP, and tracked by git when available.
 
 .SH ENVIRONMENT VARIABLES
 
@@ -462,6 +494,17 @@ must be signed using a detached signature using the GPG key specified by the ful
 upper-case fingerprint in this variable. If multiple fingerprints are specified, each
 separated by a whitespace character, then signatures must match at least one.
 The \fBinit\fP command will keep signatures of \fB.gpg-id\fP files up to date.
+.TP
+.I PASSWORD_STORE_AUDIT_LOG
+Location of the access audit log, by default
+.IR $PASSWORD_STORE_DIR/.access.log .
+Setting this variable to an empty string disables audit logging and rotation
+tracking.
+.TP
+.I PASSWORD_STORE_ROTATION_DAYS
+Rotation period in days used by the \fBaudit\fP command and the \fBshow\fP
+warning, by default \fI90\fP. Setting this to \fI0\fP disables rotation
+reminders.
 .TP
 .I EDITOR
 The location of the text editor used by \fBedit\fP.

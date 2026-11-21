@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid31128",
+  "B": "/home/dev/feedback/uid31128",
+  "sha": "db1a21e75f7e0bfafda969fb279af7e098a46a42",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "zx2c4",
+    "repo": "password-store",
+    "sha": "db1a21e75f7e0bfafda969fb279af7e098a46a42"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "password-store",
+    "cloneUrl": "https://github.com/Rrr119/password-store.git"
+  },
+  "at": "2026-11-21T00:00:38.980Z"
+}

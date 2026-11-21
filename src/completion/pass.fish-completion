@@ -106,6 +106,9 @@ complete -c $PROG -f -n '__fish_pass_uses_command --clip' -a "(__fish_pass_print
 
 complete -c $PROG -f -n '__fish_pass_needs_command' -a git -d 'Command: execute a git command'
 complete -c $PROG -f -n '__fish_pass_uses_command git' -a '(__fish_pass_git_complete)'
+complete -c $PROG -f -n '__fish_pass_needs_command' -a log -d 'Command: show the access audit log'
+complete -c $PROG -f -n '__fish_pass_uses_command log' -a "(__fish_pass_print_entries)"
+complete -c $PROG -f -n '__fish_pass_needs_command' -a audit -d 'Command: list passwords due for rotation'
 complete -c $PROG -f -n '__fish_pass_needs_command' -a find -d 'Command: find a password file or directory matching pattern'
 complete -c $PROG -f -n '__fish_pass_needs_command' -a grep -d 'Command: search inside of decrypted password files for matching pattern'
 complete -c $PROG -f -n '__fish_pass_uses_command grep' -a '(begin
